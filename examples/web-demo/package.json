@@ -11,7 +11,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@svgagift/gift-player": "0.1.1",
+    "@svgagift/gift-player": "0.1.2",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
