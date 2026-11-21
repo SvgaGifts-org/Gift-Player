@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_call: # reused by release.yml, so a release runs exactly the same checks
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_call' }}
+
+jobs:
+  # Everything that needs no browser. `npm test` includes the SSR test, which builds the package and imports every entry point in plain Node.
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      # No .svga or .webp file is committed: create the stand-ins and the synthetic WebP files (needs Chromium to encode pictures).
+      - run: npx playwright install --with-deps chromium
+      - run: npm run samples:generate
+      - run: npm test
+      - run: npm run build
+      - run: npm run check:bundle
+      - name: Packed tarball contents
+        run: npm pack --dry-run
+
+  # Every Playwright verification suite, once per browser. Only generated stand-ins and the committed GIF / PAG files are used: the
+  # real corpus (samples/corpus/) is private and git-ignored, so `verify:corpus` reports "waiting for files" and passes.
+  browsers:
+    needs: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox, webkit]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: lts/*
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      # chromium is always needed: verify:images takes its golden frames from Chromium's ImageDecoder.
+      - run: npx playwright install --with-deps chromium ${{ matrix.browser }}
+      - run: npm run samples:generate
+      # Firefox without a GPU has no WebGL in headless mode ("Exhausted GL driver options"): PAG needs it, so Firefox runs the PAG and API
+      # suites headed on a virtual display with Mesa's software GL.
+      - name: Software GL and a virtual display (Firefox)
+        if: matrix.browser == 'firefox'
+        run: sudo apt-get update && sudo apt-get install -y xvfb libgl1-mesa-dri libglx-mesa0 libegl1 libgles2
+      - run: npm run verify:browser -- --browser=${{ matrix.browser }}
+      - run: npm run verify:corpus -- --browser=${{ matrix.browser }}
+        if: ${{ !cancelled() }} # every suite reports, even after another one failed
+      - run: npm run verify:images -- --browser=${{ matrix.browser }}
+        if: ${{ !cancelled() }} # every suite reports, even after another one failed
+      - run: ${{ matrix.browser == 'firefox' && 'xvfb-run -a ' || '' }}npm run verify:pag -- --browser=${{ matrix.browser }}
+        env:
+          PW_HEADED: ${{ matrix.browser == 'firefox' && '1' || '' }}
+        if: ${{ !cancelled() }} # every suite reports, even after another one failed
+      - run: ${{ matrix.browser == 'firefox' && 'xvfb-run -a ' || '' }}npm run verify:api -- --browser=${{ matrix.browser }}
+        env:
+          PW_HEADED: ${{ matrix.browser == 'firefox' && '1' || '' }}
+        if: ${{ !cancelled() }} # every suite reports, even after another one failed
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: reports-${{ matrix.browser }}
+          path: reports/
+          retention-days: 7
